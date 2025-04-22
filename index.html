@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>where's holden?</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
+    <!-- Favicon (wind glyph) -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22currentColor%22 stroke-width=%222%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22 class=%22feather feather-wind%22><path d=%22M17.71 7.88a4.46 4.46 0 0 1-6.11 0 4.47 4.47 0 0 1 0-6.12 4.47 4.47 0 0 1 6.11 0 4.46 4.46 0 0 1 0 6.12zm-4.84 6.49a2 2 0 1 1-2.83 2.83 2 2 0 0 1 2.83-2.83zm6.45 3.53a2.99 2.99 0 0 1-4.24 0 2.99 2.99 0 0 1 0-4.24 2.99 2.99 0 0 1 4.24 0 2.99 2.99 0 0 1 0 4.24z%22/></svg>" type="image/svg+xml">
+
+    <!-- Dark‑mode styles -->
+    <style>
+        :root {
+            --bg: #2e2e2e;
+            --fg: #ffffff;
+            --accent: #ffd700;
+            --offline: #c00;
+        }
+        html, body, #map { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font-family: Arial, sans-serif; }
+        .leaflet-container { background: var(--bg); }
+
+        /* Marker & label */
+        .car-emoji { font-size: 48px; line-height: 1; }
+        .timestamp {
+            margin-top: 4px;
+            font-size: 12px;
+            color: var(--accent);
+            background: rgba(0,0,0,.7);
+            padding: 2px 4px;
+            border-radius: 3px;
+            white-space: nowrap;
+        }
+        .car-emoji-container { display: flex; flex-direction: column; align-items: center; }
+
+        /* Banner that appears when beacon is offline */
+        #statusBanner {
+            position: fixed;
+            top: 8px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--offline);
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: bold;
+            z-index: 1000;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="statusBanner">Beacon offline</div>
+    <div id="map"></div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+    /* ------------------ CONFIG ------------------ */
+    const OFFLINE_THRESHOLD_MIN = 15;      // minutes before the data is considered stale
+
+    /* ------------------ UTILITIES ------------------ */
+    function utcDateToCentral(dateObj) {
+        return dateObj.toLocaleString('en-US', {
+            timeZone: 'America/Chicago',
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+    }
+
+    function minutesSince(dateObj) {
+        return (Date.now() - dateObj.getTime()) / 60000;
+    }
+
+    function showBanner(message) {
+        const banner = document.getElementById('statusBanner');
+        banner.textContent = message;
+        banner.style.display = 'block';
+    }
+
+    /* ------------------ MAP HELPERS ------------------ */
+    let map = null;
+
+    function initMap(lat = 39.8283, lon = -98.5795, zoom = 4) {   // Fallback = US centroid
+        map = L.map('map', { zoomControl: false }).setView([lat, lon], zoom);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+    }
+
+    function addCarMarker(lat, lon, labelText, prefix = '') {
+        const iconHTML = `
+            <div class="car-emoji-container">
+                <div class="car-emoji">🚗</div>
+                <div class="timestamp">${prefix}${labelText}</div>
+            </div>`;
+        L.marker([lat, lon], {
+            icon: L.divIcon({
+                html: iconHTML,
+                className: '',
+                iconSize: [48, 60],
+                iconAnchor: [24, 30]
+            })
+        }).addTo(map);
+    }
+
+    /* ------------------ MAIN ------------------ */
+    async function loadPage() {
+        let coordsText, timeText;
+
+        /* Fetch both files in parallel */
+        try {
+            [coordsText, timeText] = await Promise.all([
+                fetch('loc.txt').then(r => r.text()),
+                fetch('lastupdate.txt').then(r => r.text())
+            ]);
+        } catch (err) {
+            console.error('Fetch error:', err);
+            initMap();                       // still show a map
+            showBanner('Beacon offline (data unreachable)');
+            return;
+        }
+
+        /* ---------- Coordinate validation ---------- */
+        const [latStr, lonStr] = coordsText.trim().split(',');
+        const lat = parseFloat(latStr);
+        const lon = parseFloat(lonStr);
+        const coordsOK = Number.isFinite(lat) && Number.isFinite(lon);
+
+        /* ---------- Timestamp validation ---------- */
+        const rawTS = timeText.trim();
+        let tsDate;
+
+        if (/^\d+$/.test(rawTS)) {                  // epoch seconds
+            tsDate = new Date(Number(rawTS) * 1000);
+        } else {
+            tsDate = new Date(rawTS);               // let browser parse ISO
+        }
+        const timeOK = tsDate instanceof Date && !isNaN(tsDate);
+
+        /* ---------- Offline decision ---------- */
+        let offlineReason = '';
+        if (!coordsOK || !timeOK) {
+            offlineReason = 'Beacon offline (bad data)';
+        } else if (minutesSince(tsDate) > OFFLINE_THRESHOLD_MIN) {
+            offlineReason = `Beacon offline >${OFFLINE_THRESHOLD_MIN} min`;
+        }
+
+        /* ---------- Map + Marker ---------- */
+        if (coordsOK) {
+            initMap(lat, lon, 10);
+            const label = timeOK ? utcDateToCentral(tsDate) : 'time unknown';
+            addCarMarker(lat, lon, label, offlineReason ? 'Last seen: ' : 'Updated: ');
+        } else {
+            initMap();  // fallback map with no marker
+        }
+
+        /* ---------- Banner ---------- */
+        if (offlineReason) {
+            showBanner(offlineReason);
+        }
+    }
+
+    /* Initial load and refresh every minute */
+    loadPage();
+    setInterval(() => location.reload(), 60_000);
+    </script>
+</body>
+</html>
